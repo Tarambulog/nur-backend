@@ -104,7 +104,7 @@ export async function checkinRoutes(app: FastifyInstance): Promise<void> {
       let recommendations: import('../types/index.js').VerseRecommendation[];
       let crisis_resources: import('../types/index.js').CrisisResources | undefined;
       try {
-        const result = await getRecommendations(emotionalProfile, language);
+        const result = await getRecommendations(emotionalProfile, language, text);
         recommendations = result.recommendations;
         crisis_resources = result.crisis_resources;
       } catch (err) {

@@ -6,6 +6,7 @@ import type {
 } from '../types/index.js';
 import { getVersesByKeys } from './verse.service.js';
 import { generatePersonalizedNote } from './nlp.service.js';
+import { semanticVerseSearch, type SemanticMatch } from './semanticSearch.service.js';
 import {
   getFallbackVerseKeys,
   CRISIS_VERSE_KEY,
@@ -64,17 +65,24 @@ export const CRISIS_RESOURCES: CrisisResources = {
 const INTENSITY_WEIGHT = 0.3;
 const THEME_OVERLAP_WEIGHT = 0.4;
 const SPIRITUAL_NEED_WEIGHT = 0.3;
+const SEMANTIC_WEIGHT = 0.5; // applied on top when a verse has a semantic match
 
 // ─── Heuristic Scorer ─────────────────────────────────────────────────────────
 
 /**
  * Computes a relevance score [0, 1] for a verse given an emotional profile.
- * Uses taxonomy metadata since we don't have embeddings at this layer.
+ *
+ * This is the deterministic layer: taxonomy metadata (curated, reviewed
+ * verse lists per emotion) plus the profile Claude produced. It runs
+ * regardless of whether semantic search is available, so the app always
+ * has a reliable ranking — see getRecommendations for how a semantic
+ * similarity score (when available) is blended on top of this.
  */
-function scoreVerse(
+export function scoreVerse(
   verseKey: string,
   profile: EmotionalProfile,
   emotionVerseKeys: string[],
+  semanticSimilarity?: number,
 ): number {
   // Base score: is this verse in the curated list for this emotion?
   const inEmotionList = emotionVerseKeys.includes(verseKey);
@@ -99,7 +107,17 @@ function scoreVerse(
         ? SPIRITUAL_NEED_WEIGHT
         : SPIRITUAL_NEED_WEIGHT * 0.2;
 
-  const rawScore = baseScore + intensityModifier + positionBonus + spiritualBonus;
+  // Semantic modifier: how close is this verse's translation to what the
+  // user actually wrote, in embedding space? Only present when
+  // VOYAGE_API_KEY is configured and the verse turned up in the semantic
+  // search results — see getRecommendations. Verses found *only* via
+  // semantic search (not in the curated list) rely almost entirely on
+  // this term, which is intentional: it's how the retrieval layer
+  // surfaces verses the hand-curated taxonomy didn't anticipate.
+  const semanticModifier = (semanticSimilarity ?? 0) * SEMANTIC_WEIGHT;
+
+  const rawScore =
+    baseScore + intensityModifier + positionBonus + spiritualBonus + semanticModifier;
   return Math.min(1, Math.max(0, rawScore));
 }
 
@@ -110,10 +128,17 @@ async function buildRecommendations(
   profile: EmotionalProfile,
   emotionVerseKeys: string[],
   language?: string,
+  semanticScores?: Map<string, number>,
 ): Promise<VerseRecommendation[]> {
-  // Compute heuristic score for each verse
+  // Compute heuristic score for each verse, blended with semantic
+  // similarity when available (see scoreVerse for how the two combine).
   const scored = verses.map((verse) => {
-    const finalScore = scoreVerse(verse.verse_key, profile, emotionVerseKeys);
+    const finalScore = scoreVerse(
+      verse.verse_key,
+      profile,
+      emotionVerseKeys,
+      semanticScores?.get(verse.verse_key),
+    );
     return { verse, finalScore };
   });
 
@@ -156,29 +181,53 @@ async function buildRecommendations(
  * Generates personalised Quran verse recommendations for a given emotional profile.
  *
  * Steps:
- * 1. Gather candidate verse keys from the emotion taxonomy
- * 2. If crisis detected, prepend 39:53 and add crisis support verses
- * 3. Fetch verse content from the verse service
- * 4. Re-rank candidates with GPT-4o-mini
- * 5. Generate personalised notes for the top results
- * 6. Return ranked VerseRecommendation array
+ * 1. Gather candidate verse keys from the curated emotion taxonomy (always available)
+ * 2. In parallel, run semantic search against the user's raw text (RAG layer —
+ *    only active when VOYAGE_API_KEY is configured and verse_embeddings is
+ *    populated; silently contributes nothing otherwise)
+ * 3. Merge both candidate sets — crisis verses always take priority
+ * 4. Fetch verse content from the verse service
+ * 5. Score candidates using the curated taxonomy + semantic similarity blend
+ * 6. Generate personalised notes for the top results
+ * 7. Return ranked VerseRecommendation array
+ *
+ * `rawText` is the PII-scrubbed check-in text (see checkin.ts) — it's what
+ * gets embedded for semantic search. It's optional because mood-only
+ * check-ins (no free text) have nothing meaningful to embed; those rely
+ * entirely on the taxonomy, which is expected and fine.
  */
 export async function getRecommendations(
   profile: EmotionalProfile,
   language?: string,
+  rawText?: string,
 ): Promise<{ recommendations: VerseRecommendation[]; crisis_resources?: CrisisResources }> {
   // Step 1: Build candidate list from emotion taxonomy
   const emotionKeys = getFallbackVerseKeys(profile.primary_emotion);
   let candidateKeys = [...emotionKeys];
 
-  // Step 2: Crisis handling
+  // Step 2: Semantic search (RAG) — runs alongside the taxonomy lookup,
+  // never blocks or replaces it. See semanticSearch.service.ts for the
+  // "no key configured → return []" behaviour that makes this safe to
+  // always call.
+  const semanticMatches: SemanticMatch[] = rawText
+    ? await semanticVerseSearch(rawText, { matchCount: 8, minSimilarity: 0.3 })
+    : [];
+
+  const semanticScores = new Map<string, number>(
+    semanticMatches.map((m) => [m.verse_key, m.similarity]),
+  );
+
+  candidateKeys = [...candidateKeys, ...semanticMatches.map((m) => m.verse_key)];
+
+  // Step 3: Crisis handling — always takes priority over both taxonomy and
+  // semantic candidates. This path is unaffected by whether RAG is enabled.
   if (profile.crisis) {
-    // Ensure 39:53 is first
     candidateKeys = candidateKeys.filter((k) => k !== CRISIS_VERSE_KEY);
     candidateKeys = [CRISIS_VERSE_KEY, ...CRISIS_SUPPORT_VERSE_KEYS, ...candidateKeys];
   }
 
-  // Deduplicate while preserving order
+  // Deduplicate while preserving order (taxonomy/crisis verses first, so
+  // ties in the scorer favour the reviewed list)
   const seen = new Set<string>();
   const deduped = candidateKeys.filter((k) => {
     if (seen.has(k)) return false;
@@ -186,10 +235,10 @@ export async function getRecommendations(
     return true;
   });
 
-  // Limit to 10 candidates for the AI ranker to keep token usage reasonable
-  const limited = deduped.slice(0, 10);
+  // Limit candidates to keep note-generation cost (one Claude call per verse) reasonable
+  const limited = deduped.slice(0, 12);
 
-  // Step 3: Fetch verse content in parallel
+  // Step 4: Fetch verse content in parallel
   const verses = await getVersesByKeys(limited, language);
 
   if (verses.length === 0) {
@@ -197,12 +246,14 @@ export async function getRecommendations(
     return { recommendations: [] };
   }
 
-  // Step 4: Build recommendations with personalised notes (heuristic ranking only)
+  // Step 5 & 6: Score (taxonomy + semantic blend) and build recommendations
+  // with personalised notes
   const recommendations = await buildRecommendations(
     verses,
     profile,
     emotionKeys,
     language,
+    semanticScores,
   );
 
   const result: { recommendations: VerseRecommendation[]; crisis_resources?: CrisisResources } = {

@@ -166,7 +166,17 @@ export interface QuranComSearchResult {
 
 // ─── Supabase Row Types ────────────────────────────────────────────────────────
 
-export interface DbUser {
+// Note: these are declared with `type`, not `interface`, deliberately.
+// TypeScript's generic constraint checking (e.g. `T extends Record<string,
+// unknown>`) only recognises plain object *type aliases* as satisfying an
+// index-signature constraint — `interface`s are excluded from that implicit
+// inference even when structurally identical. Supabase's typed client
+// (db/client.ts's `Database` generic) relies on exactly this constraint
+// internally, and using `interface` here silently broke `.upsert()` and
+// `.rpc()` type-checking (they degraded to accepting `never`). Keep these
+// as `type` — see db/client.ts for where this matters.
+
+export type DbUser = {
   id: string;
   email?: string;
   display_name?: string;
@@ -174,9 +184,9 @@ export interface DbUser {
   notification_enabled: boolean;
   created_at: string;
   updated_at: string;
-}
+};
 
-export interface DbCheckin {
+export type DbCheckin = {
   id: string;
   user_id?: string;
   input_type: InputType;
@@ -185,9 +195,9 @@ export interface DbCheckin {
   language?: string;
   session_id?: string;
   created_at: string;
-}
+};
 
-export interface DbVerseRecommendation {
+export type DbVerseRecommendation = {
   id: string;
   checkin_id: string;
   verse_key: string;
@@ -196,18 +206,18 @@ export interface DbVerseRecommendation {
   rank_position: number;
   was_saved: boolean;
   created_at: string;
-}
+};
 
-export interface DbSavedVerse {
+export type DbSavedVerse = {
   id: string;
   user_id: string;
   verse_key: string;
   personal_note?: string;
   tags: string[];
   created_at: string;
-}
+};
 
-export interface DbJournalEntry {
+export type DbJournalEntry = {
   id: string;
   user_id: string;
   checkin_id?: string;
@@ -216,13 +226,23 @@ export interface DbJournalEntry {
   dominant_emotion?: EmotionState;
   created_at: string;
   updated_at: string;
-}
+};
 
-export interface DbVerseEmotionalTag {
+export type DbVerseEmotionalTag = {
   id: string;
   verse_key: string;
   emotion: EmotionState;
   theme: string;
   weight: number;
   created_at: string;
-}
+};
+
+export type DbVerseEmbedding = {
+  verse_key: string;
+  surah_number: number;
+  ayah_number: number;
+  translation: string;
+  embedding: number[];
+  model: string;
+  created_at?: string;
+};

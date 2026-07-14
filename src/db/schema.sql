@@ -315,6 +315,73 @@ INSERT INTO verse_emotional_tags (verse_key, emotion, theme, weight) VALUES
 ON CONFLICT (verse_key, emotion, theme) DO NOTHING;
 
 -- ============================================================================
+-- VERSE_EMBEDDINGS TABLE
+-- Semantic retrieval layer (RAG). Stores a vector embedding for every Quran
+-- verse translation so a user's free-text check-in can be matched against
+-- verses by meaning, not just by the hand-curated emotion taxonomy above.
+--
+-- This is intentionally a *second*, independent retrieval path — see
+-- recommendation.service.ts for how the two are combined. The curated
+-- taxonomy always remains as a deterministic fallback: for a faith-context
+-- product, "the AI didn't respond, so nothing is shown" is not acceptable,
+-- and "the AI picked a theologically strange verse with no oversight" is
+-- worse. Semantic search augments relevance; it never fully replaces the
+-- reviewed fallback list.
+--
+-- Populated via scripts/backfillEmbeddings.ts (run once, or whenever the
+-- embedding model changes).
+-- ============================================================================
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+CREATE TABLE IF NOT EXISTS verse_embeddings (
+  verse_key    TEXT PRIMARY KEY,
+  surah_number SMALLINT NOT NULL,
+  ayah_number  SMALLINT NOT NULL,
+  translation  TEXT NOT NULL,          -- text that was embedded (for debugging/audit)
+  embedding    vector(1024) NOT NULL,  -- voyage-3-lite output dimension
+  model        TEXT NOT NULL DEFAULT 'voyage-3-lite',
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- IVFFlat index for fast approximate nearest-neighbour search.
+-- `lists` is a reasonable default for ~6,236 rows (Quran has 6,236 verses);
+-- rebuild with a higher value if the corpus grows meaningfully.
+CREATE INDEX IF NOT EXISTS idx_verse_embeddings_ivfflat
+  ON verse_embeddings
+  USING ivfflat (embedding vector_cosine_ops)
+  WITH (lists = 100);
+
+-- RPC used by semanticSearch.service.ts. Supabase's client can't express
+-- a raw ORDER BY <-> distance query, so we expose it as a Postgres function
+-- and call it via `supabase.rpc('match_verses', {...})`.
+CREATE OR REPLACE FUNCTION match_verses(
+  query_embedding vector(1024),
+  match_count INT DEFAULT 10,
+  min_similarity FLOAT DEFAULT 0.0
+)
+RETURNS TABLE (
+  verse_key TEXT,
+  surah_number SMALLINT,
+  ayah_number SMALLINT,
+  translation TEXT,
+  similarity FLOAT
+)
+LANGUAGE sql STABLE
+AS $$
+  SELECT
+    verse_embeddings.verse_key,
+    verse_embeddings.surah_number,
+    verse_embeddings.ayah_number,
+    verse_embeddings.translation,
+    1 - (verse_embeddings.embedding <=> query_embedding) AS similarity
+  FROM verse_embeddings
+  WHERE 1 - (verse_embeddings.embedding <=> query_embedding) > min_similarity
+  ORDER BY verse_embeddings.embedding <=> query_embedding
+  LIMIT match_count;
+$$;
+
+-- ============================================================================
 -- ROW LEVEL SECURITY (RLS)
 -- Enable RLS on all user-linked tables to prevent data leakage.
 -- Policies below assume Supabase Auth (JWT-based).
