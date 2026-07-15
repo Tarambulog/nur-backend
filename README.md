@@ -68,6 +68,16 @@ Send a `location` field with a check-in and the app returns `activity_suggestion
 
 That's it — no schema changes, no backfill job. Suggestions are scored the same way either way (category priority for the detected emotion, open-now status, distance); only the venue data source changes.
 
+### Seeding 50 demo users
+
+For testing or demoing against a populated database rather than an empty one:
+
+```bash
+npm run seed:demo-users
+```
+
+Requires `SUPABASE_SERVICE_ROLE_KEY` in `.env` (see `.env.example` — the anon key can't create auth users or insert rows with an explicit `id`, only the service role key can). Creates 50 Supabase Auth users (`demo.user01@nurdemo.test` through `demo.user50@nurdemo.test`, random unused passwords) plus matching `public.users` profiles and 1–3 synthetic check-ins with verse recommendations each, generated locally from the curated emotion taxonomy — no Claude or Voyage AI calls, so it's fast and free to run. Safe to bulk-delete later via the Supabase dashboard (filter Authentication by the `@nurdemo.test` domain).
+
 ### Docker
 
 ```bash

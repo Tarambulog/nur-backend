@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "backfill:embeddings": "tsx scripts/backfillEmbeddings.ts"
+    "backfill:embeddings": "tsx scripts/backfillEmbeddings.ts",
+    "seed:demo-users": "tsx scripts/seedDemoUsers.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
